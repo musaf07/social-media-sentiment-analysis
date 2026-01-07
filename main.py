@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Social Media Sentiment Analysis Pipeline
-Complete end-to-end analysis with reporting
+Social Media Sentiment Analysis Pipeline - Fixed Version
+Complete end-to-end solution with proper database schema
 """
 
 import os
@@ -12,47 +12,131 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-# ==================== SQLITE HANDLER ====================
-class SQLiteHandler:
+# ==================== DATABASE HANDLER ====================
+class DatabaseHandler:
+    """SQLite database handler with proper schema"""
+    
     def __init__(self, db_path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = None
-    
+        
     def connect(self):
+        """Establish database connection"""
         try:
             self.connection = sqlite3.connect(self.db_path)
             self.connection.execute("PRAGMA foreign_keys = ON")
             return True
         except Exception as e:
-            print(f"Database connection failed: {e}")
+            print(f"❌ Database connection failed: {e}")
             return False
-    
-    def create_tables(self, schema_file):
+            
+    def create_schema(self):
+        """Create database schema with CORRECT column names"""
+        schema = """
+        -- Drop existing tables to avoid conflicts
+        DROP TABLE IF EXISTS social_media_posts;
+        DROP TABLE IF EXISTS daily_metrics;
+        DROP TABLE IF EXISTS platform_analysis;
+        DROP TABLE IF EXISTS country_analysis;
+        DROP TABLE IF EXISTS user_summary;
+        DROP TABLE IF EXISTS hashtag_analysis;
+        
+        -- Main posts table
+        CREATE TABLE social_media_posts (
+            post_id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            platform TEXT,
+            sentiment TEXT,
+            content TEXT,
+            hashtags TEXT,
+            retweets INTEGER DEFAULT 0,
+            likes INTEGER DEFAULT 0,
+            country TEXT,
+            timestamp DATETIME,
+            created_year INTEGER,
+            created_month INTEGER,
+            created_day INTEGER,
+            created_hour INTEGER,
+            engagement_score REAL DEFAULT 0.0,
+            sentiment_score INTEGER DEFAULT 0,
+            is_peak_hour INTEGER DEFAULT 0
+        );
+        
+        -- Daily aggregated metrics - USING CORRECT COLUMN NAMES
+        CREATE TABLE daily_metrics (
+            date DATE PRIMARY KEY,
+            total_posts INTEGER DEFAULT 0,
+            positive_count INTEGER DEFAULT 0,
+            negative_count INTEGER DEFAULT 0,
+            neutral_count INTEGER DEFAULT 0,
+            avg_retweets REAL DEFAULT 0.0,
+            avg_likes REAL DEFAULT 0.0,
+            total_engagement INTEGER DEFAULT 0,
+            sentiment_ratio REAL DEFAULT 0.0,
+            peak_hour_posts INTEGER DEFAULT 0,
+            unique_users INTEGER DEFAULT 0
+        );
+        
+        -- Platform analysis - USING CORRECT COLUMN NAMES
+        CREATE TABLE platform_analysis (
+            platform TEXT,
+            date DATE,
+            sentiment TEXT,
+            post_count INTEGER DEFAULT 0,
+            avg_engagement REAL DEFAULT 0.0
+        );
+        
+        -- Country analysis - USING CORRECT COLUMN NAMES
+        CREATE TABLE country_analysis (
+            country TEXT,
+            date DATE,
+            sentiment TEXT,
+            post_count INTEGER DEFAULT 0,
+            avg_engagement REAL DEFAULT 0.0
+        );
+        
+        -- User summary - USING CORRECT COLUMN NAMES
+        CREATE TABLE user_summary (
+            user_id TEXT PRIMARY KEY,
+            total_posts INTEGER DEFAULT 0,
+            avg_sentiment_score REAL DEFAULT 0.0,
+            total_engagement INTEGER DEFAULT 0,
+            favorite_platform TEXT,
+            last_post_date DATE
+        );
+        
+        -- Create indexes for performance
+        CREATE INDEX idx_posts_timestamp ON social_media_posts(timestamp);
+        CREATE INDEX idx_posts_sentiment ON social_media_posts(sentiment);
+        CREATE INDEX idx_posts_platform ON social_media_posts(platform);
+        CREATE INDEX idx_daily_date ON daily_metrics(date);
+        """
+        
         try:
-            with open(schema_file, 'r') as f:
-                schema_sql = f.read()
             cursor = self.connection.cursor()
-            cursor.executescript(schema_sql)
+            cursor.executescript(schema)
             self.connection.commit()
             return True
         except Exception as e:
-            print(f"Table creation failed: {e}")
+            print(f"❌ Schema creation failed: {e}")
             return False
-    
-    def insert_dataframe(self, df, table_name, if_exists='replace'):
+            
+    def insert_dataframe(self, df, table_name):
+        """Insert DataFrame into table"""
         try:
-            df.to_sql(table_name, self.connection, if_exists=if_exists, index=False)
+            df.to_sql(table_name, self.connection, if_exists='replace', index=False)
             return True
         except Exception as e:
-            print(f"Data insertion failed: {e}")
+            print(f"❌ Data insertion failed for {table_name}: {e}")
             return False
-    
+            
     def execute_query(self, query, return_df=True):
+        """Execute SQL query"""
         try:
             if return_df:
                 df = pd.read_sql_query(query, self.connection)
@@ -63,15 +147,988 @@ class SQLiteHandler:
                 self.connection.commit()
                 return cursor.rowcount
         except Exception as e:
-            print(f"Query execution failed: {e}")
+            print(f"❌ Query execution failed: {e}")
             return None
-    
+            
     def close(self):
+        """Close database connection"""
         if self.connection:
             self.connection.close()
 
+# ==================== DATA PROCESSOR ====================
+class DataProcessor:
+    """Data processing and cleaning utilities"""
+    
+    @staticmethod
+    def clean_data(df):
+        """Clean and preprocess raw data"""
+        df_clean = df.copy()
+        
+        # Handle missing values
+        numeric_cols = ['retweets', 'likes']
+        for col in numeric_cols:
+            if col in df_clean.columns:
+                df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+                df_clean[col] = df_clean[col].fillna(0)
+                
+        # Fill categorical missing values
+        if 'country' in df_clean.columns:
+            df_clean['country'] = df_clean['country'].fillna('Unknown')
+        if 'hashtags' in df_clean.columns:
+            df_clean['hashtags'] = df_clean['hashtags'].fillna('')
+            
+        # Convert timestamp
+        if 'timestamp' in df_clean.columns:
+            df_clean['timestamp'] = pd.to_datetime(df_clean['timestamp'], errors='coerce')
+            
+        # Remove duplicates
+        if 'post_id' in df_clean.columns:
+            df_clean = df_clean.drop_duplicates(subset=['post_id'], keep='first')
+            
+        return df_clean
+        
+    @staticmethod
+    def calculate_features(df):
+        """Calculate derived features"""
+        df_features = df.copy()
+        
+        # Calculate engagement metrics
+        if all(col in df_features.columns for col in ['retweets', 'likes']):
+            df_features['total_engagement'] = df_features['retweets'] + df_features['likes']
+            
+            # Normalized engagement score (0-1)
+            max_engagement = df_features['total_engagement'].max()
+            if max_engagement > 0:
+                df_features['engagement_score'] = df_features['total_engagement'] / max_engagement
+            else:
+                df_features['engagement_score'] = 0.0
+                
+        # Sentiment score mapping
+        sentiment_map = {'Positive': 1, 'Neutral': 0, 'Negative': -1}
+        if 'sentiment' in df_features.columns:
+            df_features['sentiment_score'] = df_features['sentiment'].map(sentiment_map).fillna(0)
+            
+        # Extract date components
+        if 'timestamp' in df_features.columns:
+            df_features['created_year'] = pd.to_datetime(df_features['timestamp']).dt.year
+            df_features['created_month'] = pd.to_datetime(df_features['timestamp']).dt.month
+            df_features['created_day'] = pd.to_datetime(df_features['timestamp']).dt.day
+            df_features['created_hour'] = pd.to_datetime(df_features['timestamp']).dt.hour
+            
+            # Peak hour identification (9 AM - 5 PM)
+            df_features['is_peak_hour'] = df_features['created_hour'].between(9, 17).astype(int)
+            
+        return df_features
+
+# ==================== ANALYSIS ENGINE ====================
+class AnalysisEngine:
+    """Perform comprehensive data analysis with FIXED queries"""
+    
+    def __init__(self, db_handler):
+        self.db = db_handler
+        
+    def populate_aggregated_tables(self):
+        """Populate all aggregated analysis tables with CORRECT queries"""
+        try:
+            print("   📊 Populating analysis tables...")
+            
+            # Clear existing aggregated data
+            self.db.execute_query("DELETE FROM daily_metrics", return_df=False)
+            self.db.execute_query("DELETE FROM platform_analysis", return_df=False)
+            self.db.execute_query("DELETE FROM country_analysis", return_df=False)
+            self.db.execute_query("DELETE FROM user_summary", return_df=False)
+            
+            # 1. Populate daily_metrics with CORRECT column names
+            daily_query = """
+            INSERT INTO daily_metrics 
+            SELECT 
+                DATE(timestamp) as date,
+                COUNT(*) as total_posts,
+                SUM(CASE WHEN sentiment = 'Positive' THEN 1 ELSE 0 END) as positive_count,
+                SUM(CASE WHEN sentiment = 'Negative' THEN 1 ELSE 0 END) as negative_count,
+                SUM(CASE WHEN sentiment = 'Neutral' THEN 1 ELSE 0 END) as neutral_count,
+                AVG(retweets) as avg_retweets,
+                AVG(likes) as avg_likes,
+                SUM(retweets + likes) as total_engagement,
+                CASE 
+                    WHEN SUM(CASE WHEN sentiment = 'Negative' THEN 1 ELSE 0 END) > 0 
+                    THEN ROUND(1.0 * SUM(CASE WHEN sentiment = 'Positive' THEN 1 ELSE 0 END) / 
+                              SUM(CASE WHEN sentiment = 'Negative' THEN 1 ELSE 0 END), 2)
+                    ELSE 0 
+                END as sentiment_ratio,
+                SUM(is_peak_hour) as peak_hour_posts,
+                COUNT(DISTINCT user_id) as unique_users
+            FROM social_media_posts
+            WHERE timestamp IS NOT NULL
+            GROUP BY DATE(timestamp)
+            ORDER BY date
+            """
+            self.db.execute_query(daily_query, return_df=False)
+            print("     ✓ daily_metrics populated")
+            
+            # 2. Populate platform_analysis with CORRECT column names
+            platform_query = """
+            INSERT INTO platform_analysis 
+            SELECT 
+                platform,
+                DATE(timestamp) as date,
+                sentiment,
+                COUNT(*) as post_count,
+                AVG(retweets + likes) as avg_engagement
+            FROM social_media_posts
+            WHERE timestamp IS NOT NULL
+            GROUP BY platform, DATE(timestamp), sentiment
+            ORDER BY date, platform
+            """
+            self.db.execute_query(platform_query, return_df=False)
+            print("     ✓ platform_analysis populated")
+            
+            # 3. Populate country_analysis with CORRECT column names
+            country_query = """
+            INSERT INTO country_analysis 
+            SELECT 
+                country,
+                DATE(timestamp) as date,
+                sentiment,
+                COUNT(*) as post_count,
+                AVG(retweets + likes) as avg_engagement
+            FROM social_media_posts
+            WHERE timestamp IS NOT NULL AND country IS NOT NULL AND country != 'Unknown'
+            GROUP BY country, DATE(timestamp), sentiment
+            ORDER BY country, date
+            """
+            self.db.execute_query(country_query, return_df=False)
+            print("     ✓ country_analysis populated")
+            
+            # 4. Populate user_summary with CORRECT column names
+            user_query = """
+            INSERT INTO user_summary 
+            WITH user_stats AS (
+                SELECT 
+                    user_id,
+                    COUNT(*) as total_posts,
+                    AVG(sentiment_score) as avg_sentiment_score,
+                    SUM(retweets + likes) as total_engagement,
+                    MAX(DATE(timestamp)) as last_post_date
+                FROM social_media_posts
+                GROUP BY user_id
+            ),
+            user_platforms AS (
+                SELECT 
+                    user_id,
+                    platform,
+                    COUNT(*) as platform_count,
+                    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY COUNT(*) DESC) as rn
+                FROM social_media_posts
+                GROUP BY user_id, platform
+            )
+            SELECT 
+                us.user_id,
+                us.total_posts,
+                us.avg_sentiment_score,
+                us.total_engagement,
+                up.platform as favorite_platform,
+                us.last_post_date
+            FROM user_stats us
+            LEFT JOIN user_platforms up ON us.user_id = up.user_id AND up.rn = 1
+            ORDER BY us.total_engagement DESC
+            """
+            self.db.execute_query(user_query, return_df=False)
+            print("     ✓ user_summary populated")
+            
+            print("   ✅ All analysis tables populated successfully")
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Error populating tables: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+            
+    def run_analysis_queries(self):
+        """Execute comprehensive analysis queries with CORRECT column names"""
+        try:
+            print("\n   📈 Running analysis queries...")
+            
+            queries = {
+                "1. Database Statistics": """
+                SELECT 
+                    COUNT(*) as total_posts,
+                    COUNT(DISTINCT user_id) as unique_users,
+                    COUNT(DISTINCT country) as countries_covered,
+                    COUNT(DISTINCT platform) as platforms,
+                    DATE(MIN(timestamp)) as analysis_start,
+                    DATE(MAX(timestamp)) as analysis_end
+                FROM social_media_posts
+                """,
+                
+                "2. Sentiment Overview": """
+                SELECT 
+                    sentiment,
+                    COUNT(*) as post_count,
+                    ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM social_media_posts), 2) as percentage,
+                    AVG(retweets) as avg_retweets,
+                    AVG(likes) as avg_likes,
+                    AVG(engagement_score) as avg_engagement_score
+                FROM social_media_posts
+                GROUP BY sentiment
+                ORDER BY post_count DESC
+                """,
+                
+                "3. Platform Performance": """
+                SELECT 
+                    platform,
+                    COUNT(*) as total_posts,
+                    ROUND(100.0 * SUM(CASE WHEN sentiment = 'Positive' THEN 1 ELSE 0 END) / COUNT(*), 2) as positive_rate,
+                    ROUND(100.0 * SUM(CASE WHEN sentiment = 'Negative' THEN 1 ELSE 0 END) / COUNT(*), 2) as negative_rate,
+                    AVG(retweets + likes) as avg_engagement,
+                    SUM(retweets + likes) as total_engagement
+                FROM social_media_posts
+                GROUP BY platform
+                ORDER BY total_engagement DESC
+                """,
+                
+                "4. Top Engaging Users": """
+                SELECT 
+                    user_id,
+                    total_posts,
+                    ROUND(avg_sentiment_score, 2) as avg_sentiment,
+                    total_engagement,
+                    favorite_platform,
+                    last_post_date
+                FROM user_summary
+                ORDER BY total_engagement DESC
+                LIMIT 10
+                """,
+                
+                "5. Daily Trends": """
+                SELECT 
+                    date,
+                    total_posts,
+                    positive_count,
+                    negative_count,
+                    total_engagement,
+                    sentiment_ratio
+                FROM daily_metrics
+                ORDER BY date
+                LIMIT 10
+                """,
+                
+                "6. Country Analysis": """
+                SELECT 
+                    country,
+                    SUM(post_count) as total_posts,
+                    ROUND(100.0 * SUM(CASE WHEN sentiment = 'Positive' THEN post_count ELSE 0 END) / SUM(post_count), 2) as positive_percentage,
+                    ROUND(AVG(avg_engagement), 2) as avg_engagement
+                FROM country_analysis
+                GROUP BY country
+                HAVING total_posts >= 2
+                ORDER BY total_posts DESC
+                LIMIT 10
+                """
+            }
+            
+            results = {}
+            for title, query in queries.items():
+                print(f"\n     {title}:")
+                result = self.db.execute_query(query)
+                if result is not None and not result.empty:
+                    print(f"       Records: {len(result)}")
+                    print(result.to_string(index=False))
+                    results[title] = result
+                else:
+                    print(f"       No data returned")
+                    
+            return results
+            
+        except Exception as e:
+            print(f"   ❌ Analysis queries failed: {e}")
+            return {}
+
+# ==================== VISUALIZATION ENGINE ====================
+class VisualizationEngine:
+    """Create professional visualizations with FIXED queries"""
+    
+    def __init__(self, output_dir):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+    def create_all_visualizations(self, db_handler):
+        """Generate all visualization charts with CORRECT queries"""
+        try:
+            print("   🎨 Creating visualizations...")
+            
+            # Set style
+            plt.style.use('seaborn-v0_8-whitegrid')
+            sns.set_palette("husl")
+            
+            # 1. Sentiment Distribution
+            sentiment_query = """
+            SELECT sentiment, COUNT(*) as count 
+            FROM social_media_posts 
+            GROUP BY sentiment
+            """
+            sentiment_data = db_handler.execute_query(sentiment_query)
+            
+            if sentiment_data is not None and not sentiment_data.empty:
+                plt.figure(figsize=(10, 6))
+                colors = ['#4CAF50', '#FF9800', '#F44336']
+                plt.pie(sentiment_data['count'], labels=sentiment_data['sentiment'], 
+                       autopct='%1.1f%%', colors=colors, startangle=90, explode=[0.05, 0, 0])
+                plt.title('Sentiment Distribution', fontsize=16, fontweight='bold', pad=20)
+                plt.savefig(self.output_dir / 'sentiment_distribution.png', dpi=300, bbox_inches='tight')
+                plt.close()
+                print("     ✓ sentiment_distribution.png")
+            
+            # 2. Platform Performance
+            platform_query = """
+            SELECT platform, COUNT(*) as posts, AVG(retweets + likes) as avg_engagement
+            FROM social_media_posts
+            GROUP BY platform
+            ORDER BY posts DESC
+            """
+            platform_data = db_handler.execute_query(platform_query)
+            
+            if platform_data is not None and not platform_data.empty:
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+                
+                # Posts by platform
+                ax1.bar(platform_data['platform'], platform_data['posts'], color='#2196F3')
+                ax1.set_title('Posts by Platform', fontsize=14, fontweight='bold')
+                ax1.set_xlabel('Platform')
+                ax1.set_ylabel('Number of Posts')
+                ax1.tick_params(axis='x', rotation=45)
+                
+                # Engagement by platform
+                ax2.bar(platform_data['platform'], platform_data['avg_engagement'], color='#9C27B0')
+                ax2.set_title('Average Engagement by Platform', fontsize=14, fontweight='bold')
+                ax2.set_xlabel('Platform')
+                ax2.set_ylabel('Average Engagement')
+                ax2.tick_params(axis='x', rotation=45)
+                
+                plt.tight_layout()
+                plt.savefig(self.output_dir / 'platform_analysis.png', dpi=300, bbox_inches='tight')
+                plt.close()
+                print("     ✓ platform_analysis.png")
+            
+            # 3. Daily Trends - USING CORRECT column names
+            daily_query = """
+            SELECT date, total_posts, positive_count, total_engagement
+            FROM daily_metrics
+            ORDER BY date
+            """
+            daily_data = db_handler.execute_query(daily_query)
+            
+            if daily_data is not None and not daily_data.empty:
+                plt.figure(figsize=(14, 6))
+                daily_data['date'] = pd.to_datetime(daily_data['date'])
+                
+                # Plot posts
+                ax = daily_data.plot(x='date', y='total_posts', kind='line', 
+                                    marker='o', linewidth=2, color='#2196F3', 
+                                    label='Total Posts', figsize=(14, 6))
+                
+                # Plot engagement (secondary axis)
+                ax2 = ax.twinx()
+                daily_data.plot(x='date', y='total_engagement', kind='line', 
+                               marker='s', linewidth=2, color='#FF5722', 
+                               label='Total Engagement', ax=ax2)
+                
+                ax.set_xlabel('Date', fontsize=12)
+                ax.set_ylabel('Number of Posts', fontsize=12, color='#2196F3')
+                ax2.set_ylabel('Total Engagement', fontsize=12, color='#FF5722')
+                ax.set_title('Daily Posts and Engagement Trends', fontsize=16, fontweight='bold', pad=20)
+                ax.grid(True, alpha=0.3)
+                ax.tick_params(axis='x', rotation=45)
+                
+                # Add legend
+                lines1, labels1 = ax.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+                
+                plt.tight_layout()
+                plt.savefig(self.output_dir / 'daily_trends.png', dpi=300, bbox_inches='tight')
+                plt.close()
+                print("     ✓ daily_trends.png")
+            
+            # 4. Top Users
+            users_query = """
+            SELECT user_id, total_engagement, total_posts
+            FROM user_summary
+            ORDER BY total_engagement DESC
+            LIMIT 10
+            """
+            users_data = db_handler.execute_query(users_query)
+            
+            if users_data is not None and not users_data.empty:
+                plt.figure(figsize=(12, 6))
+                bars = plt.barh(users_data['user_id'], users_data['total_engagement'], color='#607D8B')
+                plt.xlabel('Total Engagement', fontsize=12)
+                plt.title('Top 10 Users by Engagement', fontsize=16, fontweight='bold', pad=20)
+                plt.gca().invert_yaxis()
+                
+                # Add value labels
+                for bar in bars:
+                    width = bar.get_width()
+                    plt.text(width, bar.get_y() + bar.get_height()/2, 
+                            f'{int(width):,}', ha='left', va='center')
+                
+                plt.tight_layout()
+                plt.savefig(self.output_dir / 'top_users.png', dpi=300, bbox_inches='tight')
+                plt.close()
+                print("     ✓ top_users.png")
+            
+            print("   ✅ All visualizations created successfully")
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Visualization creation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+# ==================== FEATURE ENGINEER ====================
+class FeatureEngineer:
+    """Create ML-ready feature sets with FIXED queries"""
+    
+    def __init__(self, output_dir, db_handler):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.db = db_handler
+        
+    def create_feature_sets(self):
+        """Generate feature sets for machine learning with CORRECT column names"""
+        try:
+            print("   🤖 Creating feature sets...")
+            
+            # 1. Daily features - USING CORRECT column names
+            daily_query = """
+            SELECT 
+                date,
+                total_posts,
+                positive_count,
+                negative_count,
+                neutral_count,
+                avg_retweets,
+                avg_likes,
+                total_engagement,
+                sentiment_ratio,
+                peak_hour_posts,
+                unique_users,
+                ROUND(1.0 * positive_count / NULLIF(total_posts, 0), 3) as positive_ratio,
+                ROUND(1.0 * negative_count / NULLIF(total_posts, 0), 3) as negative_ratio,
+                ROUND(1.0 * peak_hour_posts / NULLIF(total_posts, 0), 3) as peak_hour_ratio
+            FROM daily_metrics
+            ORDER BY date
+            """
+            daily_features = self.db.execute_query(daily_query)
+            if daily_features is not None:
+                daily_features.to_csv(self.output_dir / "daily_features.csv", index=False)
+                print(f"     ✓ daily_features.csv ({len(daily_features)} rows)")
+            
+            # 2. Platform features
+            platform_query = """
+            SELECT 
+                platform,
+                date,
+                SUM(post_count) as daily_posts,
+                AVG(avg_engagement) as avg_engagement,
+                ROUND(1.0 * SUM(CASE WHEN sentiment = 'Positive' THEN post_count ELSE 0 END) / SUM(post_count), 3) as platform_positive_ratio
+            FROM platform_analysis
+            GROUP BY platform, date
+            ORDER BY date, platform
+            """
+            platform_features = self.db.execute_query(platform_query)
+            if platform_features is not None:
+                platform_features.to_csv(self.output_dir / "platform_features.csv", index=False)
+                print(f"     ✓ platform_features.csv ({len(platform_features)} rows)")
+            
+            # 3. User features
+            user_query = """
+            SELECT 
+                user_id,
+                total_posts,
+                avg_sentiment_score,
+                total_engagement,
+                favorite_platform,
+                ROUND(1.0 * total_engagement / NULLIF(total_posts, 0), 2) as engagement_per_post,
+                CASE 
+                    WHEN total_engagement > (SELECT AVG(total_engagement) * 2 FROM user_summary) THEN 'Top Influencer'
+                    WHEN total_engagement > (SELECT AVG(total_engagement) FROM user_summary) THEN 'Active Contributor'
+                    ELSE 'Regular User'
+                END as user_segment
+            FROM user_summary
+            ORDER BY total_engagement DESC
+            """
+            user_features = self.db.execute_query(user_query)
+            if user_features is not None:
+                user_features.to_csv(self.output_dir / "user_features.csv", index=False)
+                print(f"     ✓ user_features.csv ({len(user_features)} rows)")
+            
+            print("   ✅ Feature sets created successfully")
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Feature creation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+# ==================== REPORT GENERATOR ====================
+class ReportGenerator:
+    """Generate comprehensive HTML reports with FIXED queries"""
+    
+    def __init__(self, output_dir, db_handler):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.db = db_handler
+        
+    def generate_dashboard(self):
+        """Generate interactive HTML dashboard with CORRECT queries"""
+        try:
+            print("   📋 Generating dashboard report...")
+            
+            # Get summary statistics
+            stats_query = """
+            SELECT 
+                COUNT(*) as total_posts,
+                COUNT(DISTINCT user_id) as unique_users,
+                COUNT(DISTINCT country) as countries,
+                COUNT(DISTINCT platform) as platforms,
+                ROUND(100.0 * SUM(CASE WHEN sentiment = 'Positive' THEN 1 ELSE 0 END) / COUNT(*), 2) as positive_rate,
+                AVG(retweets + likes) as avg_engagement
+            FROM social_media_posts
+            """
+            stats_result = self.db.execute_query(stats_query)
+            
+            if stats_result is None or stats_result.empty:
+                print("   ❌ No statistics data available")
+                return False
+                
+            stats = stats_result.iloc[0]
+            
+            # Get top posts
+            top_posts_query = """
+            SELECT post_id, user_id, platform, sentiment, content, 
+                   retweets, likes, (retweets + likes) as total_engagement
+            FROM social_media_posts
+            ORDER BY total_engagement DESC
+            LIMIT 5
+            """
+            top_posts = self.db.execute_query(top_posts_query)
+            
+            # Get daily metrics - USING CORRECT column names
+            daily_query = """
+            SELECT date, total_posts, positive_count, negative_count, total_engagement
+            FROM daily_metrics
+            ORDER BY date DESC
+            LIMIT 7
+            """
+            daily_data = self.db.execute_query(daily_query)
+            
+            # Generate HTML content
+            html_content = f"""
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Social Media Analytics Dashboard</title>
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                <style>
+                    * {{
+                        margin: 0;
+                        padding: 0;
+                        box-sizing: border-box;
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    }}
+                    
+                    body {{
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        min-height: 100vh;
+                        padding: 20px;
+                    }}
+                    
+                    .container {{
+                        max-width: 1400px;
+                        margin: 0 auto;
+                    }}
+                    
+                    .header {{
+                        text-align: center;
+                        margin-bottom: 30px;
+                        color: white;
+                    }}
+                    
+                    .header h1 {{
+                        font-size: 2.5rem;
+                        margin-bottom: 10px;
+                        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+                    }}
+                    
+                    .header p {{
+                        font-size: 1.1rem;
+                        opacity: 0.9;
+                    }}
+                    
+                    .dashboard {{
+                        display: grid;
+                        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                        gap: 20px;
+                        margin-bottom: 30px;
+                    }}
+                    
+                    .card {{
+                        background: white;
+                        border-radius: 15px;
+                        padding: 25px;
+                        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                        transition: transform 0.3s ease;
+                    }}
+                    
+                    .card:hover {{
+                        transform: translateY(-5px);
+                    }}
+                    
+                    .stat-card {{
+                        text-align: center;
+                        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+                    }}
+                    
+                    .stat-icon {{
+                        font-size: 2.5rem;
+                        margin-bottom: 15px;
+                        color: #667eea;
+                    }}
+                    
+                    .stat-value {{
+                        font-size: 2.2rem;
+                        font-weight: bold;
+                        color: #2c3e50;
+                        margin: 10px 0;
+                    }}
+                    
+                    .stat-label {{
+                        font-size: 1rem;
+                        color: #7f8c8d;
+                        text-transform: uppercase;
+                        letter-spacing: 1px;
+                    }}
+                    
+                    .section-title {{
+                        font-size: 1.5rem;
+                        color: #2c3e50;
+                        margin-bottom: 20px;
+                        padding-bottom: 10px;
+                        border-bottom: 2px solid #667eea;
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                    }}
+                    
+                    .section-title i {{
+                        color: #667eea;
+                    }}
+                    
+                    table {{
+                        width: 100%;
+                        border-collapse: collapse;
+                        margin-top: 10px;
+                    }}
+                    
+                    table th {{
+                        background: #667eea;
+                        color: white;
+                        padding: 12px;
+                        text-align: left;
+                    }}
+                    
+                    table td {{
+                        padding: 12px;
+                        border-bottom: 1px solid #e0e0e0;
+                    }}
+                    
+                    table tr:hover {{
+                        background: #f5f7fa;
+                    }}
+                    
+                    .sentiment-badge {{
+                        padding: 5px 12px;
+                        border-radius: 20px;
+                        font-size: 0.85rem;
+                        font-weight: bold;
+                    }}
+                    
+                    .positive {{
+                        background: #d4edda;
+                        color: #155724;
+                    }}
+                    
+                    .negative {{
+                        background: #f8d7da;
+                        color: #721c24;
+                    }}
+                    
+                    .neutral {{
+                        background: #fff3cd;
+                        color: #856404;
+                    }}
+                    
+                    .visualization-grid {{
+                        display: grid;
+                        grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+                        gap: 20px;
+                        margin: 30px 0;
+                    }}
+                    
+                    .viz-card {{
+                        background: white;
+                        border-radius: 15px;
+                        padding: 20px;
+                        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                    }}
+                    
+                    .viz-card img {{
+                        width: 100%;
+                        height: auto;
+                        border-radius: 10px;
+                    }}
+                    
+                    .footer {{
+                        text-align: center;
+                        margin-top: 40px;
+                        padding: 20px;
+                        color: white;
+                        opacity: 0.8;
+                    }}
+                    
+                    @media (max-width: 768px) {{
+                        .dashboard {{
+                            grid-template-columns: 1fr;
+                        }}
+                        
+                        .visualization-grid {{
+                            grid-template-columns: 1fr;
+                        }}
+                        
+                        .header h1 {{
+                            font-size: 2rem;
+                        }}
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1><i class="fas fa-chart-line"></i> Social Media Analytics Dashboard</h1>
+                        <p>Comprehensive Analysis of Social Media Sentiment and Engagement</p>
+                        <p style="margin-top: 10px; font-size: 0.9rem;">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                    </div>
+                    
+                    <div class="dashboard">
+                        <div class="card stat-card">
+                            <i class="fas fa-comment-dots stat-icon"></i>
+                            <div class="stat-value">{int(stats['total_posts'])}</div>
+                            <div class="stat-label">Total Posts</div>
+                        </div>
+                        
+                        <div class="card stat-card">
+                            <i class="fas fa-users stat-icon"></i>
+                            <div class="stat-value">{int(stats['unique_users'])}</div>
+                            <div class="stat-label">Unique Users</div>
+                        </div>
+                        
+                        <div class="card stat-card">
+                            <i class="fas fa-globe-americas stat-icon"></i>
+                            <div class="stat-value">{int(stats['countries'])}</div>
+                            <div class="stat-label">Countries</div>
+                        </div>
+                        
+                        <div class="card stat-card">
+                            <i class="fas fa-thumbs-up stat-icon"></i>
+                            <div class="stat-value">{stats['positive_rate']:.1f}%</div>
+                            <div class="stat-label">Positive Sentiment</div>
+                        </div>
+                    </div>
+                    
+                    <div class="visualization-grid">
+                        <div class="viz-card">
+                            <h3 class="section-title"><i class="fas fa-chart-pie"></i> Sentiment Distribution</h3>
+                            <img src="visualizations/sentiment_distribution.png" alt="Sentiment Distribution">
+                        </div>
+                        
+                        <div class="viz-card">
+                            <h3 class="section-title"><i class="fas fa-chart-bar"></i> Platform Analysis</h3>
+                            <img src="visualizations/platform_analysis.png" alt="Platform Analysis">
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3 class="section-title"><i class="fas fa-trophy"></i> Top Performing Posts</h3>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Post ID</th>
+                                    <th>User</th>
+                                    <th>Platform</th>
+                                    <th>Sentiment</th>
+                                    <th>Retweets</th>
+                                    <th>Likes</th>
+                                    <th>Total Engagement</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            """
+            
+            # Add top posts rows
+            if top_posts is not None and not top_posts.empty:
+                for _, row in top_posts.iterrows():
+                    sentiment_class = row['sentiment'].lower() if row['sentiment'] else 'neutral'
+                    html_content += f"""
+                                <tr>
+                                    <td>{row['post_id']}</td>
+                                    <td>{row['user_id']}</td>
+                                    <td>{row['platform']}</td>
+                                    <td><span class="sentiment-badge {sentiment_class}">{row['sentiment']}</span></td>
+                                    <td>{int(row['retweets'])}</td>
+                                    <td>{int(row['likes'])}</td>
+                                    <td><strong>{int(row['total_engagement'])}</strong></td>
+                                </tr>
+                    """
+            
+            html_content += f"""
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <div class="card" style="margin-top: 20px;">
+                        <h3 class="section-title"><i class="fas fa-calendar-alt"></i> Recent Daily Metrics</h3>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Date</th>
+                                    <th>Total Posts</th>
+                                    <th>Positive Posts</th>
+                                    <th>Negative Posts</th>
+                                    <th>Total Engagement</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            """
+            
+            # Add daily metrics rows
+            if daily_data is not None and not daily_data.empty:
+                for _, row in daily_data.iterrows():
+                    html_content += f"""
+                                <tr>
+                                    <td>{row['date']}</td>
+                                    <td>{int(row['total_posts'])}</td>
+                                    <td>{int(row['positive_count'])}</td>
+                                    <td>{int(row['negative_count'])}</td>
+                                    <td><strong>{int(row['total_engagement'])}</strong></td>
+                                </tr>
+                    """
+            
+            html_content += f"""
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <div class="card" style="margin-top: 20px; background: linear-gradient(135deg, #e0f7fa 0%, #80deea 100%);">
+                        <h3 class="section-title"><i class="fas fa-lightbulb"></i> Insights & Recommendations</h3>
+                        <div style="padding: 15px; line-height: 1.6;">
+                            <p><strong>📈 Key Findings:</strong></p>
+                            <ul style="margin-left: 20px; margin-bottom: 15px;">
+                                <li>Positive sentiment rate: <strong>{stats['positive_rate']:.1f}%</strong></li>
+                                <li>Average engagement per post: <strong>{stats['avg_engagement']:.0f}</strong></li>
+                                <li>Analysis covers: <strong>{int(stats['total_posts'])} posts</strong> from <strong>{int(stats['unique_users'])} users</strong></li>
+                            </ul>
+                            
+                            <p><strong>🎯 Recommendations:</strong></p>
+                            <ul style="margin-left: 20px;">
+                                <li>Focus on platforms with highest engagement rates</li>
+                                <li>Schedule posts during peak hours for maximum visibility</li>
+                                <li>Monitor negative sentiment trends for brand protection</li>
+                                <li>Engage with top users to build brand advocacy</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class="footer">
+                        <p>© 2024 Social Media Analytics Dashboard | Generated with ❤️ using Python</p>
+                        <p style="font-size: 0.9rem; margin-top: 5px;">
+                            <i class="fas fa-database"></i> Database: {int(stats['total_posts'])} posts | 
+                            <i class="fas fa-user-friends"></i> {int(stats['unique_users'])} users | 
+                            <i class="fas fa-chart-bar"></i> {int(stats['platforms'])} platforms
+                        </p>
+                    </div>
+                </div>
+                
+                <script>
+                    // Simple animation for stat cards
+                    document.addEventListener('DOMContentLoaded', function() {{
+                        const statCards = document.querySelectorAll('.stat-card');
+                        statCards.forEach((card, index) => {{
+                            setTimeout(() => {{
+                                card.style.opacity = '1';
+                                card.style.transform = 'translateY(0)';
+                            }}, index * 100);
+                        }});
+                    }});
+                </script>
+            </body>
+            </html>
+            """
+            
+            # Save HTML file
+            report_path = self.output_dir / "dashboard.html"
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+                
+            print("     ✓ dashboard.html generated")
+            
+            # Generate simple text summary
+            summary_content = f"""
+            ===============================
+            SOCIAL MEDIA ANALYSIS SUMMARY
+            ===============================
+            Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            
+            📊 OVERVIEW STATISTICS:
+            • Total Posts: {int(stats['total_posts'])}
+            • Unique Users: {int(stats['unique_users'])}
+            • Countries: {int(stats['countries'])}
+            • Platforms: {int(stats['platforms'])}
+            • Positive Rate: {stats['positive_rate']:.1f}%
+            • Avg Engagement: {stats['avg_engagement']:.0f}
+            
+            📈 ANALYSIS COMPLETE
+            Files Generated:
+            1. Database: data/processed/social_media.db
+            2. Dashboard: reports/dashboard.html  
+            3. Visualizations: reports/visualizations/*.png
+            4. Feature Sets: data/feature_sets/*.csv
+            """
+            
+            summary_path = self.output_dir / "analysis_summary.txt"
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                f.write(summary_content)
+                
+            print("     ✓ analysis_summary.txt generated")
+            print("   ✅ Dashboard generation completed")
+            
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Dashboard generation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
 # ==================== MAIN ANALYZER ====================
 class SocialMediaAnalyzer:
+    """Main orchestrator for social media analysis"""
+    
     def __init__(self):
         self.project_root = Path(__file__).parent
         self.data_dir = self.project_root / "data"
@@ -81,654 +1138,289 @@ class SocialMediaAnalyzer:
         # Create required directories
         for path in [self.data_dir, self.data_dir / "raw", 
                      self.data_dir / "processed", self.data_dir / "feature_sets"]:
-            path.mkdir(exist_ok=True)
+            path.mkdir(parents=True, exist_ok=True)
+            
+        # Initialize components
+        self.db = DatabaseHandler(self.data_dir / "processed" / "social_media.db")
         
-        # Initialize database
-        self.db = SQLiteHandler(self.data_dir / "processed" / "social_media.db")
+        print("=" * 70)
+        print("🤖 SOCIAL MEDIA SENTIMENT ANALYZER - FIXED VERSION")
+        print("=" * 70)
         
-        print("=" * 60)
-        print("SOCIAL MEDIA SENTIMENT ANALYZER")
-        print("=" * 60)
-    
-    def check_environment(self):
-        print("\n1. Checking environment...")
-        
-        # Check Python version
-        python_version = sys.version_info
-        print(f"   Python: {python_version.major}.{python_version.minor}.{python_version.micro}")
-        
-        # Check packages
-        required = ['pandas', 'numpy', 'matplotlib', 'seaborn', 'sqlite3']
-        missing = []
-        
-        for package in required:
-            try:
-                __import__(package)
-                print(f"   ✓ {package}")
-            except ImportError:
-                missing.append(package)
-                print(f"   ✗ {package}")
-        
-        if missing:
-            print(f"\n   Missing: {missing}")
-            print("   Install: pip install " + " ".join(missing))
-            return False
-        
-        # Check data
-        if not self.raw_data_path.exists():
-            print(f"   Creating sample data...")
-            self._create_sample_data()
-        
-        print("   ✓ Environment OK")
-        return True
-    
-    def _create_sample_data(self):
-        """Create sample data if none exists"""
-        np.random.seed(42)
-        sample_data = {
-            'post_id': range(1, 101),
-            'user_id': [f'user_{i:03d}' for i in range(1, 101)],
-            'platform': np.random.choice(['Twitter', 'Instagram', 'Facebook'], 100),
-            'sentiment': np.random.choice(['Positive', 'Negative', 'Neutral'], 100, p=[0.5, 0.3, 0.2]),
-            'content': [f'Sample post {i}' for i in range(1, 101)],
-            'hashtags': np.random.choice(['#tech', '#news', '#update', '#review', ''], 100),
-            'retweets': np.random.randint(0, 1000, 100),
-            'likes': np.random.randint(0, 5000, 100),
-            'country': np.random.choice(['USA', 'UK', 'Canada', 'Australia', 'India'], 100),
-            'timestamp': pd.date_range('2024-01-01', periods=100, freq='H'),
-        }
-        
-        df = pd.DataFrame(sample_data)
-        df['created_year'] = df['timestamp'].dt.year
-        df['created_month'] = df['timestamp'].dt.month
-        df['created_day'] = df['timestamp'].dt.day
-        df['created_hour'] = df['timestamp'].dt.hour
-        
-        df.to_csv(self.raw_data_path, index=False)
-        print(f"   Created sample data: {len(df)} records")
-    
-    def load_data(self):
-        print("\n2. Loading data...")
-        
-        try:
-            self.raw_df = pd.read_csv(self.raw_data_path)
-            print(f"   ✓ Loaded {len(self.raw_df)} records")
-            print(f"   Columns: {', '.join(self.raw_df.columns[:5])}...")
-            return True
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-            return False
-    
-    def clean_data(self):
-        print("\n3. Cleaning data...")
-        
-        self.df = self.raw_df.copy()
-        initial_rows = len(self.df)
-        
-        # Fill missing values
-        if 'retweets' in self.df.columns:
-            self.df['retweets'] = pd.to_numeric(self.df['retweets'], errors='coerce')
-            self.df['retweets'] = self.df['retweets'].fillna(self.df['retweets'].median())
-        
-        if 'likes' in self.df.columns:
-            self.df['likes'] = pd.to_numeric(self.df['likes'], errors='coerce')
-            self.df['likes'] = self.df['likes'].fillna(self.df['likes'].median())
-        
-        self.df['country'] = self.df['country'].fillna('Unknown')
-        self.df['hashtags'] = self.df['hashtags'].fillna('')
-        
-        # Convert timestamp
-        if 'timestamp' in self.df.columns:
-            self.df['timestamp'] = pd.to_datetime(self.df['timestamp'], errors='coerce')
-        
-        # Remove duplicates
-        self.df = self.df.drop_duplicates(subset=['post_id'], keep='first')
-        
-        # Create features
-        if 'retweets' in self.df.columns and 'likes' in self.df.columns:
-            max_val = self.df['retweets'].max() + self.df['likes'].max() + 1e-10
-            self.df['engagement_score'] = (self.df['retweets'] + self.df['likes']) / max_val
-        
-        sentiment_map = {'Positive': 1, 'Neutral': 0, 'Negative': -1}
-        self.df['sentiment_score'] = self.df['sentiment'].map(sentiment_map)
-        
-        # Save cleaned data
-        self.df.to_csv(self.processed_data_path, index=False)
-        
-        print(f"   ✓ Cleaned {len(self.df)} records (removed {initial_rows - len(self.df)} duplicates)")
-        print(f"   Saved: {self.processed_data_path}")
-        return True
-    
-    def setup_database(self):
-        print("\n4. Setting up database...")
-        
-        try:
-            self.db.connect()
-            
-            # Create SQL directory
-            sql_dir = self.project_root / "sql" / "sqlite"
-            sql_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create schema
-            schema_file = sql_dir / "create_tables.sql"
-            if not schema_file.exists():
-                schema = """
-                CREATE TABLE IF NOT EXISTS social_media_posts (
-                    post_id INTEGER PRIMARY KEY,
-                    user_id TEXT,
-                    platform TEXT,
-                    sentiment TEXT,
-                    content TEXT,
-                    hashtags TEXT,
-                    retweets INTEGER,
-                    likes INTEGER,
-                    country TEXT,
-                    timestamp TIMESTAMP,
-                    created_year INTEGER,
-                    created_month INTEGER,
-                    created_day INTEGER,
-                    created_hour INTEGER,
-                    engagement_score REAL,
-                    sentiment_score INTEGER,
-                    is_peak_hour INTEGER DEFAULT 0
-                );
-                
-                CREATE TABLE IF NOT EXISTS daily_metrics (
-                    date DATE PRIMARY KEY,
-                    total_posts INTEGER,
-                    positive_count INTEGER,
-                    negative_count INTEGER,
-                    neutral_count INTEGER,
-                    avg_retweets REAL,
-                    avg_likes REAL,
-                    total_engagement INTEGER
-                );
-                
-                CREATE INDEX IF NOT EXISTS idx_timestamp ON social_media_posts(timestamp);
-                CREATE INDEX IF NOT EXISTS idx_platform ON social_media_posts(platform);
-                CREATE INDEX IF NOT EXISTS idx_sentiment ON social_media_posts(sentiment);
-                """
-                schema_file.write_text(schema)
-            
-            # Create tables and load data
-            self.db.create_tables(str(schema_file))
-            self.db.insert_dataframe(self.df, 'social_media_posts')
-            
-            # Set peak hours
-            self.db.execute_query("""
-                UPDATE social_media_posts 
-                SET is_peak_hour = CASE 
-                    WHEN created_hour BETWEEN 9 AND 17 THEN 1 
-                    ELSE 0 
-                END
-            """, return_df=False)
-            
-            # Create daily metrics
-            self.db.execute_query("DELETE FROM daily_metrics", return_df=False)
-            self.db.execute_query("""
-                INSERT INTO daily_metrics
-                SELECT 
-                    DATE(timestamp) as date,
-                    COUNT(*) as total_posts,
-                    SUM(CASE WHEN sentiment = 'Positive' THEN 1 ELSE 0 END) as positive_count,
-                    SUM(CASE WHEN sentiment = 'Negative' THEN 1 ELSE 0 END) as negative_count,
-                    SUM(CASE WHEN sentiment = 'Neutral' THEN 1 ELSE 0 END) as neutral_count,
-                    AVG(retweets) as avg_retweets,
-                    AVG(likes) as avg_likes,
-                    SUM(retweets + likes) as total_engagement
-                FROM social_media_posts
-                WHERE timestamp IS NOT NULL
-                GROUP BY DATE(timestamp)
-            """, return_df=False)
-            
-            print("   ✓ Database setup completed")
-            return True
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-            return False
-    
-    def analyze_data(self):
-        print("\n5. Analyzing data...")
-        
-        try:
-            # Create queries file
-            sql_dir = self.project_root / "sql" / "sqlite"
-            queries_file = sql_dir / "analysis_queries.sql"
-            
-            if not queries_file.exists():
-                queries = """-- Query 1: Sentiment Summary
-SELECT 
-    sentiment,
-    COUNT(*) as count,
-    ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM social_media_posts), 1) as percentage,
-    AVG(retweets) as avg_retweets,
-    AVG(likes) as avg_likes
-FROM social_media_posts
-GROUP BY sentiment
-ORDER BY count DESC;
-
--- Query 2: Platform Performance
-SELECT 
-    platform,
-    COUNT(*) as posts,
-    ROUND(100.0 * SUM(CASE WHEN sentiment = 'Positive' THEN 1 ELSE 0 END) / COUNT(*), 1) as positive_pct,
-    AVG(retweets + likes) as avg_engagement
-FROM social_media_posts
-GROUP BY platform
-ORDER BY posts DESC;
-
--- Query 3: Daily Trends
-SELECT 
-    DATE(timestamp) as date,
-    COUNT(*) as daily_posts,
-    SUM(CASE WHEN sentiment = 'Positive' THEN 1 ELSE 0 END) as positive_posts,
-    AVG(retweets + likes) as avg_engagement
-FROM social_media_posts
-GROUP BY DATE(timestamp)
-ORDER BY date;
-
--- Query 4: Top Posts
-SELECT 
-    post_id,
-    platform,
-    sentiment,
-    content,
-    retweets,
-    likes,
-    retweets + likes as total_engagement
-FROM social_media_posts
-ORDER BY total_engagement DESC
-LIMIT 5;
-
--- Query 5: Country Analysis
-SELECT 
-    country,
-    COUNT(*) as posts,
-    ROUND(100.0 * SUM(CASE WHEN sentiment = 'Positive' THEN 1 ELSE 0 END) / COUNT(*), 1) as positive_pct
-FROM social_media_posts
-WHERE country != 'Unknown'
-GROUP BY country
-ORDER BY posts DESC;
-"""
-                queries_file.write_text(queries)
-            
-            # Execute queries
-            with open(queries_file, 'r') as f:
-                queries = f.read().split('-- Query')
-            
-            for i, query in enumerate(queries[1:], 1):
-                query = '-- Query' + query.strip()
-                if query:
-                    print(f"\n   Query {i}:")
-                    result = self.db.execute_query(query.split('\n', 1)[1])
-                    if result is not None and not result.empty:
-                        print(f"   Shape: {result.shape}")
-                        print(result.head().to_string())
-            
-            # Basic statistics
-            print("\n   Basic Statistics:")
-            print(f"   - Total posts: {len(self.df)}")
-            print(f"   - Unique users: {self.df['user_id'].nunique()}")
-            print(f"   - Platforms: {', '.join(self.df['platform'].unique())}")
-            
-            if 'sentiment' in self.df.columns:
-                counts = self.df['sentiment'].value_counts()
-                for sentiment, count in counts.items():
-                    pct = (count / len(self.df)) * 100
-                    print(f"   - {sentiment}: {count} ({pct:.1f}%)")
-            
-            print("\n   ✓ Analysis completed")
-            return True
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-            return False
-    
-    def create_visualizations(self):
-        print("\n6. Creating visualizations...")
-        
-        try:
-            viz_dir = self.project_root / "reports" / "visualizations"
-            viz_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Set style
-            plt.style.use('seaborn-v0_8-darkgrid')
-            sns.set_palette("husl")
-            
-            # 1. Sentiment Pie Chart
-            plt.figure(figsize=(8, 6))
-            sentiment_counts = self.df['sentiment'].value_counts()
-            colors = ['#4CAF50', '#FF9800', '#F44336']  # Green, Orange, Red
-            plt.pie(sentiment_counts.values, labels=sentiment_counts.index, 
-                   autopct='%1.1f%%', colors=colors, startangle=90)
-            plt.title('Sentiment Distribution', fontsize=14, fontweight='bold')
-            plt.savefig(viz_dir / 'sentiment_pie.png', dpi=300, bbox_inches='tight')
-            plt.close()
-            print("   ✓ sentiment_pie.png")
-            
-            # 2. Platform Bar Chart
-            plt.figure(figsize=(10, 6))
-            platform_data = self.df.groupby('platform').size()
-            platform_data.plot(kind='bar', color='#2196F3')
-            plt.title('Posts by Platform', fontsize=14, fontweight='bold')
-            plt.xlabel('Platform')
-            plt.ylabel('Number of Posts')
-            plt.xticks(rotation=0)
-            plt.tight_layout()
-            plt.savefig(viz_dir / 'platform_bars.png', dpi=300, bbox_inches='tight')
-            plt.close()
-            print("   ✓ platform_bars.png")
-            
-            # 3. Engagement by Sentiment
-            if 'retweets' in self.df.columns and 'likes' in self.df.columns:
-                plt.figure(figsize=(10, 6))
-                engagement = self.df.groupby('sentiment')[['retweets', 'likes']].mean()
-                engagement.plot(kind='bar')
-                plt.title('Average Engagement by Sentiment', fontsize=14, fontweight='bold')
-                plt.xlabel('Sentiment')
-                plt.ylabel('Average Count')
-                plt.legend(['Retweets', 'Likes'])
-                plt.tight_layout()
-                plt.savefig(viz_dir / 'engagement_bars.png', dpi=300, bbox_inches='tight')
-                plt.close()
-                print("   ✓ engagement_bars.png")
-            
-            # 4. Daily Trends
-            if 'timestamp' in self.df.columns:
-                plt.figure(figsize=(12, 5))
-                self.df['date'] = pd.to_datetime(self.df['timestamp']).dt.date
-                daily = self.df.groupby('date').size()
-                plt.plot(daily.index, daily.values, marker='o', linewidth=2, color='#9C27B0')
-                plt.title('Daily Post Volume', fontsize=14, fontweight='bold')
-                plt.xlabel('Date')
-                plt.ylabel('Posts')
-                plt.grid(True, alpha=0.3)
-                plt.xticks(rotation=45)
-                plt.tight_layout()
-                plt.savefig(viz_dir / 'daily_trends.png', dpi=300, bbox_inches='tight')
-                plt.close()
-                print("   ✓ daily_trends.png")
-            
-            print(f"   All visualizations saved to: {viz_dir}")
-            return True
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-            return False
-    
-    def prepare_features(self):
-        print("\n7. Preparing features for modeling...")
-        
-        try:
-            features_dir = self.project_root / "data" / "feature_sets"
-            features_dir.mkdir(exist_ok=True)
-            
-            # Feature 1: Daily aggregates
-            daily_query = """
-            SELECT 
-                DATE(timestamp) as date,
-                COUNT(*) as total_posts,
-                SUM(CASE WHEN sentiment = 'Positive' THEN 1 ELSE 0 END) as positive_count,
-                SUM(CASE WHEN sentiment = 'Negative' THEN 1 ELSE 0 END) as negative_count,
-                AVG(retweets) as avg_retweets,
-                AVG(likes) as avg_likes,
-                SUM(retweets + likes) as total_engagement
-            FROM social_media_posts
-            WHERE timestamp IS NOT NULL
-            GROUP BY DATE(timestamp)
-            ORDER BY date
-            """
-            
-            daily_features = self.db.execute_query(daily_query)
-            if daily_features is not None:
-                daily_features.to_csv(features_dir / "daily_features.csv", index=False)
-                print(f"   ✓ daily_features.csv ({len(daily_features)} rows)")
-            
-            # Feature 2: Platform daily
-            platform_query = """
-            SELECT 
-                DATE(timestamp) as date,
-                platform,
-                COUNT(*) as posts,
-                AVG(retweets + likes) as avg_engagement
-            FROM social_media_posts
-            GROUP BY DATE(timestamp), platform
-            ORDER BY date, platform
-            """
-            
-            platform_features = self.db.execute_query(platform_query)
-            if platform_features is not None:
-                platform_features.to_csv(features_dir / "platform_features.csv", index=False)
-                print(f"   ✓ platform_features.csv ({len(platform_features)} rows)")
-            
-            print("\n   Feature sets ready for ML modeling")
-            return True
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-            return False
-    
-    def generate_report(self):
-        print("\n8. Generating report...")
-        
-        try:
-            report_dir = self.project_root / "reports"
-            report_dir.mkdir(exist_ok=True)
-            
-            # Calculate metrics
-            total_posts = len(self.df)
-            unique_users = self.df['user_id'].nunique()
-            platforms = self.df['platform'].nunique()
-            
-            if 'sentiment' in self.df.columns:
-                sentiment_counts = self.df['sentiment'].value_counts()
-                positive = sentiment_counts.get('Positive', 0)
-                negative = sentiment_counts.get('Negative', 0)
-                neutral = sentiment_counts.get('Neutral', 0)
-                positive_pct = (positive / total_posts) * 100 if total_posts > 0 else 0
-            else:
-                positive = negative = neutral = positive_pct = 0
-            
-            # Get date range
-            if 'timestamp' in self.df.columns:
-                try:
-                    start_date = self.df['timestamp'].min().strftime('%Y-%m-%d')
-                    end_date = self.df['timestamp'].max().strftime('%Y-%m-%d')
-                except:
-                    start_date = end_date = "N/A"
-            else:
-                start_date = end_date = "N/A"
-            
-            # HTML Report
-            html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>Social Media Analysis Report</title>
-    <meta charset="UTF-8">
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 40px; }}
-        h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
-        .metrics {{ display: flex; flex-wrap: wrap; gap: 20px; margin: 30px 0; }}
-        .metric-box {{ background: #f8f9fa; border: 1px solid #ddd; border-radius: 8px; padding: 20px; min-width: 200px; }}
-        .metric-value {{ font-size: 36px; font-weight: bold; color: #2c3e50; }}
-        .metric-label {{ color: #7f8c8d; font-size: 14px; margin-top: 5px; }}
-        .insights {{ background: #e8f4fc; padding: 20px; border-radius: 8px; margin: 20px 0; }}
-        .viz {{ text-align: center; margin: 30px 0; }}
-        img {{ max-width: 100%; height: auto; border: 1px solid #ddd; }}
-        footer {{ margin-top: 40px; padding-top: 20px; border-top: 1px solid #eee; color: #7f8c8d; }}
-    </style>
-</head>
-<body>
-    <h1>Social Media Sentiment Analysis Report</h1>
-    <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    
-    <div class="metrics">
-        <div class="metric-box">
-            <div class="metric-value">{total_posts}</div>
-            <div class="metric-label">Total Posts</div>
-        </div>
-        <div class="metric-box">
-            <div class="metric-value">{unique_users}</div>
-            <div class="metric-label">Unique Users</div>
-        </div>
-        <div class="metric-box">
-            <div class="metric-value">{positive_pct:.1f}%</div>
-            <div class="metric-label">Positive Sentiment</div>
-        </div>
-        <div class="metric-box">
-            <div class="metric-value">{platforms}</div>
-            <div class="metric-label">Platforms</div>
-        </div>
-    </div>
-    
-    <div class="insights">
-        <h3>Key Insights</h3>
-        <p>• Period: {start_date} to {end_date}</p>
-        <p>• Positive posts: {positive} ({positive_pct:.1f}%)</p>
-        <p>• Negative posts: {negative} ({(negative/total_posts*100):.1f}%)</p>
-        <p>• Neutral posts: {neutral} ({(neutral/total_posts*100):.1f}%)</p>
-    </div>
-    
-    <h3>Visualizations</h3>
-    <div class="viz">
-        <img src="visualizations/sentiment_pie.png" alt="Sentiment Distribution">
-        <p><em>Figure 1: Sentiment Distribution</em></p>
-    </div>
-    
-    <div class="viz">
-        <img src="visualizations/platform_bars.png" alt="Platform Distribution">
-        <p><em>Figure 2: Posts by Platform</em></p>
-    </div>
-    
-    <div class="insights">
-        <h3>Next Steps</h3>
-        <ol>
-            <li>Use feature sets in <code>data/feature_sets/</code> for ML modeling</li>
-            <li>Correlate sentiment with sales data</li>
-            <li>Monitor negative sentiment trends</li>
-            <li>Optimize posting times based on engagement</li>
-        </ol>
-    </div>
-    
-    <footer>
-        <p>Analysis completed successfully. Ready for predictive modeling.</p>
-    </footer>
-</body>
-</html>"""
-            
-            # Save HTML report
-            report_path = report_dir / "analysis_report.html"
-            with open(report_path, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-            
-            # Simple text summary
-            summary = f"""# Analysis Summary
-Date: {datetime.now().strftime('%Y-%m-%d')}
-Total Posts: {total_posts}
-Positive: {positive} ({positive_pct:.1f}%)
-Negative: {negative} ({(negative/total_posts*100):.1f}%)
-Neutral: {neutral} ({(neutral/total_posts*100):.1f}%)
-Period: {start_date} to {end_date}
-Platforms: {platforms}
-Unique Users: {unique_users}
-"""
-            
-            summary_path = report_dir / "summary.txt"
-            with open(summary_path, 'w', encoding='utf-8') as f:
-                f.write(summary)
-            
-            print(f"   ✓ analysis_report.html")
-            print(f"   ✓ summary.txt")
-            return True
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    def run_analysis(self):
-        print("\n" + "=" * 60)
-        print("STARTING ANALYSIS PIPELINE")
-        print("=" * 60)
+    def run_pipeline(self):
+        """Execute complete analysis pipeline"""
+        print("\n🚀 Starting analysis pipeline...")
         
         steps = [
-            ("Environment", self.check_environment),
+            ("Environment Check", self.check_environment),
             ("Data Loading", self.load_data),
-            ("Data Cleaning", self.clean_data),
-            ("Database", self.setup_database),
-            ("Analysis", self.analyze_data),
+            ("Data Processing", self.process_data),
+            ("Database Setup", self.setup_database),
+            ("Analysis Engine", self.run_analysis),
             ("Visualization", self.create_visualizations),
-            ("Feature Prep", self.prepare_features),
-            ("Reporting", self.generate_report)
+            ("Feature Engineering", self.create_features),
+            ("Reporting", self.generate_reports)
         ]
         
         results = []
         for name, func in steps:
-            print(f"\n[{name}]")
+            print(f"\n{'='*50}")
+            print(f"📋 STEP: {name}")
+            print(f"{'='*50}")
+            
             try:
-                if func():
-                    results.append((name, True, "✓"))
-                else:
-                    results.append((name, False, "✗"))
+                success = func()
+                results.append((name, success, "✅" if success else "❌"))
             except Exception as e:
-                print(f"   Error: {e}")
-                results.append((name, False, "✗"))
+                print(f"   ❌ Error in {name}: {e}")
+                import traceback
+                traceback.print_exc()
+                results.append((name, False, "❌"))
         
-        # Summary
-        print("\n" + "=" * 60)
-        print("ANALYSIS SUMMARY")
-        print("=" * 60)
+        # Display summary
+        print(f"\n{'='*70}")
+        print("📊 ANALYSIS PIPELINE SUMMARY")
+        print(f"{'='*70}")
         
         success_count = 0
         for name, success, symbol in results:
             status = "PASS" if success else "FAIL"
-            print(f"{symbol} {name}: {status}")
+            print(f"{symbol} {name:<20} {status}")
             if success:
                 success_count += 1
         
-        self.db.close()
-        
-        print(f"\nSuccess: {success_count}/{len(steps)} steps completed")
+        print(f"\n📈 Success Rate: {success_count}/{len(steps)} steps completed")
         
         if success_count == len(steps):
-            print("\n✅ Analysis completed successfully!")
-            print("📊 Open: reports/analysis_report.html")
-            print("📈 Check: reports/visualizations/")
-            print("🤖 Use: data/feature_sets/ for ML")
+            print("\n🎉 ANALYSIS COMPLETED SUCCESSFULLY!")
+            print(f"📊 Dashboard: reports/dashboard.html")
+            print(f"📈 Visualizations: reports/visualizations/")
+            print(f"🤖 Features: data/feature_sets/")
+            print(f"💾 Database: data/processed/social_media.db")
         else:
             print("\n⚠️ Analysis completed with some errors")
+            
+        self.db.close()
+        return success_count == len(steps)
+        
+    def check_environment(self):
+        """Check system environment and dependencies"""
+        print("   🔍 Checking environment...")
+        
+        # Python version
+        python_version = sys.version_info
+        print(f"     Python: {python_version.major}.{python_version.minor}.{python_version.micro}")
+        
+        # Required packages
+        required = ['pandas', 'numpy', 'matplotlib', 'seaborn']
+        
+        for package in required:
+            try:
+                __import__(package)
+                print(f"     ✓ {package}")
+            except ImportError:
+                print(f"     ✗ {package}")
+                return False
+        
+        # Check data file
+        if not self.raw_data_path.exists():
+            print(f"     ❌ Data file not found: {self.raw_data_path}")
+            return False
+        else:
+            print(f"     ✓ Data file found")
+            
+        print("   ✅ Environment check completed")
+        return True
+        
+    def load_data(self):
+        """Load raw data from CSV"""
+        print("   📥 Loading data...")
+        
+        try:
+            self.raw_df = pd.read_csv(self.raw_data_path)
+            print(f"     ✓ Loaded {len(self.raw_df)} records")
+            return True
+        except Exception as e:
+            print(f"     ❌ Error loading data: {e}")
+            return False
+            
+    def process_data(self):
+        """Clean and process data"""
+        print("   🧹 Processing data...")
+        
+        try:
+            initial_rows = len(self.raw_df)
+            
+            # Clean data
+            processor = DataProcessor()
+            self.df = processor.clean_data(self.raw_df)
+            
+            # Calculate features
+            self.df = processor.calculate_features(self.df)
+            
+            # Save processed data
+            self.df.to_csv(self.processed_data_path, index=False)
+            
+            print(f"     ✓ Processed {len(self.df)} records")
+            print(f"     ✓ Saved: {self.processed_data_path}")
+            return True
+        except Exception as e:
+            print(f"     ❌ Error processing data: {e}")
+            return False
+            
+    def setup_database(self):
+        """Setup database and load data"""
+        print("   💾 Setting up database...")
+        
+        try:
+            # Connect to database
+            if not self.db.connect():
+                return False
+                
+            # Create schema
+            if not self.db.create_schema():
+                return False
+                
+            # Load data into main table
+            if not self.db.insert_dataframe(self.df, 'social_media_posts'):
+                return False
+                
+            print("     ✓ Database schema created")
+            print("     ✓ Data loaded into social_media_posts")
+            return True
+        except Exception as e:
+            print(f"     ❌ Database setup failed: {e}")
+            return False
+            
+    def run_analysis(self):
+        """Run comprehensive analysis"""
+        print("   📊 Running analysis...")
+        
+        try:
+            # Initialize analysis engine
+            analyzer = AnalysisEngine(self.db)
+            
+            # Populate all analysis tables
+            if not analyzer.populate_aggregated_tables():
+                return False
+                
+            # Run analysis queries
+            analysis_results = analyzer.run_analysis_queries()
+            
+            if not analysis_results:
+                return False
+                
+            print("     ✅ Analysis completed successfully")
+            return True
+        except Exception as e:
+            print(f"     ❌ Analysis failed: {e}")
+            return False
+            
+    def create_visualizations(self):
+        """Create visualization charts"""
+        print("   🎨 Creating visualizations...")
+        
+        try:
+            viz_dir = self.project_root / "reports" / "visualizations"
+            viz_engine = VisualizationEngine(viz_dir)
+            
+            if not viz_engine.create_all_visualizations(self.db):
+                return False
+                
+            print("     ✅ Visualizations created successfully")
+            return True
+        except Exception as e:
+            print(f"     ❌ Visualization creation failed: {e}")
+            return False
+            
+    def create_features(self):
+        """Create feature sets for ML"""
+        print("   🤖 Creating feature sets...")
+        
+        try:
+            features_dir = self.project_root / "data" / "feature_sets"
+            feature_engineer = FeatureEngineer(features_dir, self.db)
+            
+            if not feature_engineer.create_feature_sets():
+                return False
+                
+            print("     ✅ Feature sets created successfully")
+            return True
+        except Exception as e:
+            print(f"     ❌ Feature creation failed: {e}")
+            return False
+            
+    def generate_reports(self):
+        """Generate reports and dashboard"""
+        print("   📋 Generating reports...")
+        
+        try:
+            reports_dir = self.project_root / "reports"
+            report_generator = ReportGenerator(reports_dir, self.db)
+            
+            if not report_generator.generate_dashboard():
+                return False
+                
+            print("     ✅ Reports generated successfully")
+            return True
+        except Exception as e:
+            print(f"     ❌ Report generation failed: {e}")
+            return False
 
 # ==================== MAIN EXECUTION ====================
-def clean_project():
-    """Remove unwanted files and directories"""
-    project_root = Path(__file__).parent
-    
-    # Remove unwanted directories
-    unwanted = [".ipynb_checkpoints", "__pycache__", ".vscode", ".idea"]
-    for pattern in unwanted:
-        for path in project_root.rglob(pattern):
-            try:
-                if path.is_dir():
-                    import shutil
-                    shutil.rmtree(path)
-            except:
-                pass
-    
-    # Create clean structure
-    dirs = [
-        "data/raw",
-        "data/processed",
-        "data/feature_sets",
-        "reports/visualizations",
-        "sql/sqlite"
-    ]
-    
-    for dir_path in dirs:
-        (project_root / dir_path).mkdir(parents=True, exist_ok=True)
-    
-    # Create requirements if missing
-    req_file = project_root / "requirements.txt"
-    if not req_file.exists():
-        req_file.write_text("pandas\nnumpy\nmatplotlib\nseaborn\n")
+def main():
+    """Main entry point"""
+    try:
+        # Clean up project
+        project_root = Path(__file__).parent
+        
+        # Remove unwanted directories
+        unwanted = [".ipynb_checkpoints", "__pycache__"]
+        for pattern in unwanted:
+            for path in project_root.rglob(pattern):
+                try:
+                    if path.is_dir():
+                        import shutil
+                        shutil.rmtree(path, ignore_errors=True)
+                except:
+                    pass
+        
+        # Create required directories
+        required_dirs = [
+            "reports/visualizations",
+            "data/feature_sets"
+        ]
+        
+        for dir_path in required_dirs:
+            (project_root / dir_path).mkdir(parents=True, exist_ok=True)
+        
+        # Run analysis
+        analyzer = SocialMediaAnalyzer()
+        success = analyzer.run_pipeline()
+        
+        if success:
+            print("\n" + "="*70)
+            print("🎯 NEXT STEPS:")
+            print("="*70)
+            print("1. Open the interactive dashboard:")
+            print("   📊 file://" + str(project_root / "reports" / "dashboard.html"))
+            print("\n2. Explore feature sets for machine learning:")
+            print("   🤖 data/feature_sets/")
+            print("\n3. Check visualizations:")
+            print("   🎨 reports/visualizations/")
+            print("\n4. Query the database:")
+            print("   💾 data/processed/social_media.db")
+        
+        return 0 if success else 1
+        
+    except KeyboardInterrupt:
+        print("\n\n⏹️ Analysis interrupted by user")
+        return 1
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
 
 if __name__ == "__main__":
-    clean_project()
-    analyzer = SocialMediaAnalyzer()
-    analyzer.run_analysis()
+    sys.exit(main())

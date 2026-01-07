@@ -1,9 +1,9 @@
 # Analysis Summary
 Date: 2026-01-07
-Total Posts: 20
-Positive: 10 (50.0%)
-Negative: 5 (25.0%)
-Neutral: 5 (25.0%)
-Period: 2024-01-15 to 2024-01-24
+Total Posts: 15
+Positive: 7 (46.7%)
+Negative: 4 (26.7%)
+Neutral: 4 (26.7%)
+Period: 2024-01-15 to 2024-01-22
 Platforms: 3
-Unique Users: 14
+Unique Users: 12
