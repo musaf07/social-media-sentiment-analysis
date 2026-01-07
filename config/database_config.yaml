@@ -1,0 +1,10 @@
+# Database Configuration for Social Media Analysis
+database:
+  default: "sqlite"
+  
+  sqlite:
+    database_path: "data/processed/social_media.db"
+    journal_mode: "WAL"
+    cache_size: -2000
+    synchronous: "NORMAL"
+    

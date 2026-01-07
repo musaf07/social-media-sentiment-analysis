@@ -1,0 +1,21 @@
+post_id,user_id,platform,sentiment,content,hashtags,retweets,likes,country,timestamp,created_year,created_month,created_day,created_hour
+1,user_001,Twitter,Positive,"Great product! Loving the new features","#tech #innovation",120,450,USA,2024-01-15 09:30:00,2024,1,15,9
+2,user_002,Instagram,Negative,"Service was terrible today","#disappointed #badservice",5,12,UK,2024-01-15 14:15:00,2024,1,15,14
+3,user_003,Facebook,Neutral,"Just sharing some updates","#news",45,89,Canada,2024-01-16 11:45:00,2024,1,16,11
+4,user_004,Twitter,Positive,"Amazing customer support!","#happy #satisfied",230,780,USA,2024-01-16 16:30:00,2024,1,16,16
+5,user_005,Instagram,Negative,"Product stopped working after 2 days","#frustrated #broken",15,30,Australia,2024-01-17 10:00:00,2024,1,17,10
+6,user_001,Twitter,Positive,"Best purchase this year","#recommended #loveit",340,1200,USA,2024-01-17 19:45:00,2024,1,17,19
+7,user_006,Facebook,Neutral,"Checking out the new collection","#shopping",67,134,UK,2024-01-18 13:20:00,2024,1,18,13
+8,user_007,Instagram,Positive,"Beautiful design and functionality","#design #quality",180,560,Canada,2024-01-18 15:10:00,2024,1,18,15
+9,user_002,Twitter,Negative,"Shipping delays are unacceptable","#late #disappointed",25,48,UK,2024-01-19 08:30:00,2024,1,19,8
+10,user_008,Facebook,Positive,"Exceeded my expectations","#excellent #value",95,310,Australia,2024-01-19 20:00:00,2024,1,19,20
+11,user_009,Twitter,Neutral,"Regular product, nothing special","#average",12,35,USA,2024-01-20 12:00:00,2024,1,20,12
+12,user_010,Instagram,Positive,"Would buy again in a heartbeat","#repeatcustomer",420,1500,Canada,2024-01-20 17:45:00,2024,1,20,17
+13,user_003,Facebook,Negative,"Customer service needs improvement","#needsimprovement",8,19,USA,2024-01-21 09:15:00,2024,1,21,9
+14,user_011,Twitter,Positive,"Fast delivery and great quality","#fastshipping #quality",310,890,Australia,2024-01-21 14:30:00,2024,1,21,14
+15,user_012,Instagram,Neutral,"Product photos vs reality","#review",55,120,UK,2024-01-22 11:00:00,2024,1,22,11
+16,user_004,Twitter,Positive,"Game changer for my business","#business #tools",560,2100,USA,2024-01-22 18:20:00,2024,1,22,18
+17,user_013,Facebook,Negative,"Overpriced for what you get","#overpriced",18,42,Canada,2024-01-23 10:45:00,2024,1,23,10
+18,user_005,Instagram,Positive,"Perfect for beginners and experts","#easyuse",290,980,Australia,2024-01-23 16:15:00,2024,1,23,16
+19,user_014,Twitter,Neutral,"Standard features, does the job","#standard",33,78,UK,2024-01-24 13:50:00,2024,1,24,13
+20,user_006,Facebook,Positive,"Best investment I've made","#investment #worthit",120,450,USA,2024-01-24 21:00:00,2024,1,24,21
